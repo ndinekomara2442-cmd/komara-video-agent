@@ -1,11 +1,14 @@
 """
 Komara Agency 🇬🇳 — Telegram Bot pour l'Agent Vidéo IA
 Utilise Hugging Face Inference API (100% gratuit) + Pollinations.ai fallback.
+Supporte Webhook (rapide) ET Polling (fallback).
 """
 
 import os
 import json
 import logging
+import asyncio
+from flask import Flask, request, jsonify
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -22,6 +25,15 @@ from komara_video_agent import (
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN_2", "")
 BRAND_NAME = "Komara Agency 🇬🇳"
+
+# Webhook config
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")  # e.g. https://komara-ai-agent.up.railway.app
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "komara_secret_2026")
+PORT = int(os.environ.get("PORT", 8080))
+
+# Mode: webhook if WEBHOOK_URL is set, otherwise polling
+USE_WEBHOOK = bool(WEBHOOK_URL)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -137,7 +149,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     chat_id = update.effective_chat.id
 
-    # Menu buttons
     if user_text == "🎬 Générer vidéo":
         await generer(update, context)
         return
@@ -156,7 +167,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await help_command(update, context)
         return
 
-    # Génération vidéo
     await context.bot.send_message(chat_id, f"🎬 Génération en cours...\n📝 Prompt : {user_text[:200]}\n⏳ Patientez ~30-60s...")
 
     result = generate_video(prompt=user_text)
@@ -170,7 +180,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif result.get("status") == "loading":
         await context.bot.send_message(chat_id, f"⏳ {result.get('message', 'Modèle en chargement. Réessayez dans 30s.')}")
     else:
-        # Fallback: générer une image au lieu d'une vidéo
         await context.bot.send_message(chat_id, "⚠️ Vidéo indisponible. Génération d'image en fallback...")
         img_result = generate_image(prompt=user_text)
         if img_result.get("status") == "success" and img_result.get("file_path"):
@@ -178,7 +187,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with open(img_result["file_path"], "rb") as img_file:
                     await context.bot.send_photo(chat_id, photo=img_file, caption=f"🖼️ Image générée par {BRAND_NAME}\n📝 {user_text[:100]}")
             except Exception:
-                # Pollinations fallback
                 poll_result = generate_image_pollinations(prompt=user_text)
                 if poll_result.get("status") == "success" and poll_result.get("file_path"):
                     with open(poll_result["file_path"], "rb") as img_file:
@@ -186,7 +194,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await context.bot.send_message(chat_id, f"❌ Erreur : {img_result.get('error', 'Inconnue')}")
         else:
-            # Pollinations last resort
             poll_result = generate_image_pollinations(prompt=user_text)
             if poll_result.get("status") == "success":
                 with open(poll_result["file_path"], "rb") as img_file:
@@ -228,32 +235,157 @@ async def error_handler(update, context):
     logger.error("Exception: %s", context.error)
 
 # ============================================
-# MAIN
+# APPLICATION SETUP
 # ============================================
+
+def build_application():
+    """Build and configure the Telegram Application with all handlers."""
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("services", services))
+    application.add_handler(CommandHandler("templates", templates))
+    application.add_handler(CommandHandler("generer", generer))
+    application.add_handler(CommandHandler("contact", contact))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CallbackQueryHandler(template_callback, pattern="^tpl_"))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_error_handler(error_handler)
+
+    return application
+
+# ============================================
+# FLASK WEBHOOK MODE
+# ============================================
+
+flask_app = Flask(__name__)
+flask_app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+
+# Global application instance for webhook
+telegram_app: Application = None
+
+@flask_app.route("/")
+def home():
+    return jsonify({
+        "status": "ok",
+        "service": BRAND_NAME,
+        "mode": "webhook" if USE_WEBHOOK else "polling",
+        "bot": "@ndinekomara_Bot"
+    })
+
+@flask_app.route("/health")
+def health():
+    return jsonify({"status": "healthy", "service": BRAND_NAME})
+
+@flask_app.route(WEBHOOK_PATH, methods=["POST"])
+def webhook():
+    """Receive updates from Telegram via webhook."""
+    secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if secret_header != WEBHOOK_SECRET:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    update_data = request.get_json(force=True)
+    update = Update.de_json(update_data, telegram_app.bot)
+    
+    # Process update asynchronously
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(telegram_app.process_update(update))
+    finally:
+        loop.close()
+
+    return jsonify({"status": "ok"})
+
+@flask_app.route("/setwebhook")
+def set_webhook():
+    """Set the Telegram webhook. Call this URL once after deploy."""
+    import urllib.request
+    full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+    data = json.dumps({
+        "url": full_url,
+        "secret_token": WEBHOOK_SECRET,
+        "max_connections": 40,
+        "allowed_updates": ["message", "callback_query"]
+    }).encode()
+    req = urllib.request.Request(api_url, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            result = json.loads(resp.read().decode())
+        return jsonify({"result": result, "webhook_url": full_url})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@flask_app.route("/delwebhook")
+def del_webhook():
+    """Remove the Telegram webhook (switch back to polling)."""
+    import urllib.request
+    api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
+    req = urllib.request.Request(api_url, data=b'{}', headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            result = json.loads(resp.read().decode())
+        return jsonify({"result": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ============================================
+# MAIN — WEBHOOK OR POLLING
+# ============================================
+
+async def setup_webhook():
+    """Set the webhook on Telegram."""
+    full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    await telegram_app.bot.set_webhook(
+        url=full_url,
+        secret_token=WEBHOOK_SECRET,
+        max_connections=40,
+        allowed_updates=["message", "callback_query"]
+    )
+    logger.info("✅ Webhook set: %s", full_url)
+
+async def run_webhook():
+    """Run the Flask app with webhook mode."""
+    global telegram_app
+    telegram_app = build_application()
+    await telegram_app.initialize()
+    await setup_webhook()
+    
+    flask_app.run(host="0.0.0.0", port=PORT, debug=False)
+
+def run_polling():
+    """Fallback: run with polling."""
+    app = build_application()
+    print(f"🚀 {BRAND_NAME} — Bot Vidéo IA (Hugging Face Edition)")
+    print(f"🤖 @ndinekomara_Bot")
+    print(f"💎 100% gratuit — HF + Pollinations")
+    print("📡 Polling (fallback)...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 def main():
     if not BOT_TOKEN:
         print("ERREUR : TELEGRAM_BOT_TOKEN_2 non défini.")
         return
 
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("services", services))
-    app.add_handler(CommandHandler("templates", templates))
-    app.add_handler(CommandHandler("generer", generer))
-    app.add_handler(CommandHandler("contact", contact))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CallbackQueryHandler(template_callback, pattern="^tpl_"))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
-
-    print(f"🚀 {BRAND_NAME} — Bot Vidéo IA (Hugging Face Edition)")
-    print(f"🤖 @ndinekomara_Bot")
-    print(f"💎 100% gratuit — HF + Pollinations")
-    print("📡 Polling...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    if USE_WEBHOOK:
+        print(f"🚀 {BRAND_NAME} — Bot Vidéo IA")
+        print(f"📡 Webhook mode — réponses instantanées")
+        print(f"🌐 URL: {WEBHOOK_URL}{WEBHOOK_PATH}")
+        
+        global telegram_app
+        telegram_app = build_application()
+        
+        # Initialize and set webhook
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(telegram_app.initialize())
+        loop.run_until_complete(setup_webhook())
+        
+        # Start Flask
+        flask_app.run(host="0.0.0.0", port=PORT, debug=False)
+    else:
+        run_polling()
 
 if __name__ == "__main__":
     main()
