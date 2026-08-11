@@ -1,37 +1,27 @@
-# Intégration Komara Video Agent
+# Komara Agency 🇬🇳 — Intégration Hugging Face
 
-## Étapes
+## Configuration
 
-1. Obtenir une clé API MiniMax
-   - Aller sur https://platform.minimax.io
-   - Créer un compte
-   - Générer une API key
+1. Obtenir un token Hugging Face (gratuit)
+   - Aller sur https://huggingface.co/settings/tokens
+   - Créer un token (Read permissions)
 
-2. Configurer les variables d'environnement
-   ```
-   export MINIMAX_API_KEY="your_key"
-   ```
-
-3. Utiliser l'agent
-   ```python
-   from komara_video_agent import generate_video, check_video_status
-   
-   # Générer une vidéo
-   result = generate_video("Logo animation with golden particles", duration=6)
-   task_id = result["task_id"]
-   
-   # Vérifier le statut
-   status = check_video_status(task_id)
+2. Définir les variables d'environnement :
+   ```bash
+   export TELEGRAM_BOT_TOKEN_2="your_bot_token"
+   export HUGGING_FACE_ACCESS_TOKEN="your_hf_token"
+   export WEBHOOK_URL="https://your-app.up.railway.app"
    ```
 
-## Intégration Telegram
-Le bot Telegram @Komara_Agency_botbot peut être étendu pour:
-- Recevoir un prompt texte
-- Appeler l'API MiniMax H3
-- Renvoyer le lien vidéo au client
+3. Lancer le bot :
+   ```bash
+   python telegram_bot.py
+   ```
 
-## Tarifs vidéo (suggestion)
-- Vidéo 6s: 500k GNF
-- Vidéo 10s: 800k GNF
-- Vidéo 15s: 1M GNF
-- Express 24h: +30%
+## API utilisées
+
+- Hugging Face Inference API (gratuit) — génération vidéo/image
+- Pollinations.ai (fallback gratuit) — génération image
+- Telegram Bot API — messagerie
+
+## Aucune clé payante requise
