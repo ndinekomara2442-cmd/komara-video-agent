@@ -1,2 +1,4 @@
 *.safetensors
 .env
+__pycache__/
+*.pyc
