@@ -5,6 +5,7 @@ Hugging Face en backup pour les images.
 """
 
 import os
+import re
 import time
 import json
 import requests
@@ -31,14 +32,12 @@ BRAND = "Komara Agency 🇬🇳"
 # PROMPT ENHANCEMENT — Komara Brand Aesthetic
 # ============================================
 
-# Qualité de base injectée dans chaque prompt pour du photoréalisme
 QUALITY_TAGS = (
     "photorealistic, 8K, ultra detailed, sharp focus, "
     "cinematic lighting, natural skin texture, visible pores, "
     "no plastic look, no cartoon, professional photography"
 )
 
-# Tags par genre pour cohérence
 GENRE_TAGS = {
     "portrait": "studio portrait, 85mm lens, shallow depth of field, bokeh background, soft lighting on face",
     "product": "product photography, studio lighting, clean background, macro detail, sharp focus",
@@ -50,26 +49,89 @@ GENRE_TAGS = {
     "branding": "luxury African brand aesthetic, black and gold palette, warm tones, premium feel",
 }
 
+# Mots-clés par genre — utilisés avec correspondance de MOTS ENTIERS (pas de sous-chaîne)
+GENRE_KEYWORDS = {
+    "portrait": ["portrait", "personne", "visage", "homme", "femme", "fille", "garcon", "garçon", "face", "head", "man", "woman", "person"],
+    "product": ["produit", "product", "montre", "bijoux", "bouteille", "chaussure", "sneaker", "bag", "sac", "parfum"],
+    "fashion": ["mode", "fashion", "vetement", "vêtement", "tenue", "runway", "modele", "modèle", "model", "look"],
+    "landscape": ["paysage", "landscape", "nature", "montagne", "mer", "ocean", "océan", "plage", "beach", "coucher", "foret", "forêt", "campagne"],
+    "street": ["rue", "street", "ville", "urban", "candid", "reportage"],
+    "food": ["plat", "food", "cuisine", "repas", "restaurant", "dessert", "boisson", "gastronomie"],
+    "architecture": ["batiment", "bâtiment", "architecture", "immeuble", "building", "interieur", "intérieur"],
+    "branding": ["logo", "brand", "marque", "affiche", "poster", "flyer", "branding", "identite", "identité"],
+}
+
+# Mots-clés visuels génériques — si aucun n'apparaît, le prompt n'est probablement pas une description d'image
+VISUAL_INDICATOR_WORDS = [
+    "photo", "image", "portrait", "genere", "génère", "cree", "crée", "montre", "dessine",
+    "homme", "femme", "personne", "produit", "paysage", "logo", "affiche", "scene", "scène",
+    "lumiere", "lumière", "fond", "style", "couleur", "studio", "eclairage", "éclairage",
+    "man", "woman", "person", "product", "landscape", "scene", "light", "background",
+    "vetement", "vêtement", "voiture", "animal", "ville", "nature", "batiment", "bâtiment",
+    "portrait", "visage", "cheveux", "yeux", "sourire", "vue", "plan", "cadrage",
+    # Sujets courants (animaux, objets, véhicules) — pour éviter de rejeter des prompts simples valides
+    "chien", "chat", "dog", "cat", "cheval", "horse", "oiseau", "bird", "lion", "tigre",
+    "elephant", "éléphant", "voiture", "car", "moto", "avion", "plane", "bateau", "boat",
+    "fleur", "flower", "arbre", "tree", "fruit", "montagne", "mountain", "riviere", "rivière",
+    "enfant", "child", "bebe", "bébé", "couple", "famille", "family", "groupe", "group",
+]
+
+# Mots grossiers / non-descriptifs à rejeter (liste non exhaustive, en minuscule)
+BLOCKED_WORDS = {
+    "merde", "putain", "connard", "connasse", "salope", "encule", "enculé", "batard", "bâtard",
+    "shit", "fuck", "bitch", "asshole", "damn", "crap",
+}
+
+def _normalize(text):
+    """Normalise le texte pour la comparaison (minuscule, sans accents complexes)."""
+    return text.lower().strip()
+
+def _contains_word(text, word):
+    """Vérifie qu'un mot entier (pas une sous-chaîne) est présent dans le texte."""
+    pattern = r'\b' + re.escape(word) + r'\b'
+    return re.search(pattern, text, flags=re.IGNORECASE) is not None
+
+def validate_prompt(prompt):
+    """
+    Valide qu'un prompt est une description d'image exploitable.
+    Retourne (is_valid, reason_si_invalide).
+    """
+    text = _normalize(prompt)
+
+    if len(text) < 3:
+        return False, "Description trop courte."
+
+    words = re.findall(r"[a-zàâäéèêëïîôöùûüç']+", text)
+
+    # Prompt composé uniquement d'un mot bloqué / grossier
+    if len(words) <= 2 and any(w in BLOCKED_WORDS for w in words):
+        return False, "Ce n'est pas une description d'image valide."
+
+    # Aucun mot visuel reconnu ET prompt très court (1-2 mots) → probablement pas une description
+    has_visual_word = any(_contains_word(text, w) for w in VISUAL_INDICATOR_WORDS)
+    has_genre_word = any(
+        _contains_word(text, kw)
+        for kws in GENRE_KEYWORDS.values()
+        for kw in kws
+    )
+
+    if not has_visual_word and not has_genre_word and len(words) <= 3:
+        return False, "Je n'ai pas compris ta demande. Décris ce que tu veux voir (sujet, ambiance, style)."
+
+    return True, None
+
 def detect_genre(prompt):
-    """Détecte le genre visuel basé sur les mots-clés du prompt."""
-    p = prompt.lower()
-    if any(w in p for w in ["portrait", "personne", "visage", "homme", "femme", "fille", "garçon", "face", "head"]):
-        return "portrait"
-    if any(w in p for w in ["produit", "product", "montre", "bijoux", "bouteille", "chaussure", "sneaker", "bag"]):
-        return "product"
-    if any(w in p for w in ["mode", "fashion", "vêtement", "tenue", "runway", "modèle", "model", "style"]):
-        return "fashion"
-    if any(w in p for w in ["paysage", "landscape", "nature", "montagne", "mer", "coucher soleil", "forêt"]):
-        return "landscape"
-    if any(w in p for w in ["rue", "street", "ville", "urban", "candid", "reportage"]):
-        return "street"
-    if any(w in p for w in ["plat", "food", "cuisine", "repas", "restaurant", "dessert", "boisson"]):
-        return "food"
-    if any(w in p for w in ["bâtiment", "architecture", "immeuble", "building", "design intérieur", "interior"]):
-        return "architecture"
-    if any(w in p for w in ["logo", "brand", "marque", "affiche", "poster", "flyer", "branding"]):
-        return "branding"
-    return "portrait"  # défaut
+    """Détecte le genre visuel — compte les correspondances de MOTS ENTIERS par genre
+    et retourne celui avec le plus de correspondances (pas juste le premier trouvé)."""
+    text = _normalize(prompt)
+    scores = {}
+    for genre, keywords in GENRE_KEYWORDS.items():
+        count = sum(1 for kw in keywords if _contains_word(text, kw))
+        if count > 0:
+            scores[genre] = count
+    if not scores:
+        return "portrait"  # défaut si rien de spécifique détecté
+    return max(scores, key=scores.get)
 
 def enhance_prompt(prompt):
     """
@@ -78,8 +140,6 @@ def enhance_prompt(prompt):
     """
     genre = detect_genre(prompt)
     genre_tags = GENRE_TAGS.get(genre, "")
-
-    # Le prompt utilisateur est au centre, les tags de qualité autour
     enhanced = f"{prompt}, {genre_tags}, {QUALITY_TAGS}"
     return enhanced
 
@@ -88,13 +148,8 @@ def enhance_prompt(prompt):
 # ============================================
 
 def generate_image_pollinations(prompt, width=768, height=1024):
-    """
-    Génère une image via Pollinations.ai.
-    Avantages: gratuit, pas de clé, suit les prompts, rapide.
-    """
+    """Génère une image via Pollinations.ai."""
     enhanced = enhance_prompt(prompt)
-
-    # Pollinations prend le prompt encodé dans l'URL
     encoded = urllib.parse.quote(enhanced)
     url = f"{POLLINATIONS_URL}/{encoded}?width={width}&height={height}&nologo=true&seed={int(time.time()) % 1000000}"
 
@@ -154,20 +209,22 @@ def generate_image_hf(prompt, model=MODEL_T2I):
 def generate_image(prompt, width=768, height=1024):
     """
     Génère une image photoréaliste à partir d'un prompt.
+    Valide d'abord le prompt, puis:
     1. Pollinations (rapide, fiable, suit les prompts)
     2. Hugging Face (backup)
     """
-    # Tentative 1: Pollinations
+    is_valid, reason = validate_prompt(prompt)
+    if not is_valid:
+        return {"status": "invalid", "error": reason}
+
     result = generate_image_pollinations(prompt, width, height)
     if result.get("status") == "success":
         return result
 
-    # Tentative 2: Hugging Face
     result = generate_image_hf(prompt)
     if result.get("status") == "success":
         return result
 
-    # Échec
     return {"status": "error", "error": "Tous les fournisseurs ont échoué"}
 
 # ============================================
@@ -176,16 +233,20 @@ def generate_image(prompt, width=768, height=1024):
 
 def generate_variations(prompt, count=2):
     """Génère plusieurs variations de la même image."""
+    is_valid, reason = validate_prompt(prompt)
+    if not is_valid:
+        return []
+
     results = []
     for i in range(count):
         result = generate_image_pollinations(prompt)
         if result.get("status") == "success":
             results.append(result)
-        time.sleep(1)  # éviter le rate limit
+        time.sleep(1)
     return results
 
 # ============================================
-# INFO POUR LE BOT
+# TEMPLATES
 # ============================================
 
 PROMPT_TEMPLATES = {

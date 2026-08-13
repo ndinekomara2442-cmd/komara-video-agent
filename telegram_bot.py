@@ -18,7 +18,8 @@ from telegram.ext import (
 )
 from komara_video_agent import (
     generate_image, generate_image_pollinations, generate_image_hf,
-    enhance_prompt, detect_genre, PROMPT_TEMPLATES,
+    generate_variations, enhance_prompt, detect_genre, validate_prompt,
+    PROMPT_TEMPLATES,
 )
 
 # ============================================
@@ -187,42 +188,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not prompt:
             await update.message.reply_text("❌ Ajoute un prompt après 'variations:'")
             return
-        await context.bot.send_message(
-            chat_id,
-            f"🎨 Génération de 2 variations...\n📝 {prompt[:150]}\n⏳ ~30s..."
-        )
         await _generate_and_send(chat_id, context, prompt, variations=True)
         return
 
-    # Détection: le texte est-il un prompt valide?
-    if len(user_text) < 3:
-        await update.message.reply_text(
-            "❌ Description trop courte.\n"
-            "Envoie au moins une phrase descriptive.\n"
-            "Ex: « logo luxury africain noir et or »"
-        )
-        return
-
-    # Génération normale
+    # Génération normale — la validation se fait dans _generate_and_send
     await _generate_and_send(chat_id, context, user_text, variations=False)
 
 async def _generate_and_send(chat_id, context, prompt, variations=False):
-    """Génère et envoie l'image au chat Telegram."""
-    # Informer l'utilisateur
-    genre = detect_genre(prompt)
-    enhanced = enhance_prompt(prompt)
+    """Valide le prompt, génère et envoie l'image au chat Telegram."""
 
-    status_msg = await context.bot.send_message(
+    # 1. Valider le prompt AVANT tout traitement
+    is_valid, reason = validate_prompt(prompt)
+    if not is_valid:
+        await context.bot.send_message(
+            chat_id,
+            f"🤔 {reason}\n\n"
+            f"Donne-moi une vraie description visuelle, par exemple :\n"
+            f"« Portrait d'un homme africain, costume noir, lumière dorée, studio »\n"
+            f"« Logo luxury noir et or pour une marque de mode »\n"
+            f"« Paysage de Conakry au coucher du soleil, vue aérienne »"
+        )
+        return
+
+    genre = detect_genre(prompt)
+
+    await context.bot.send_message(
         chat_id,
         f"📸 Génération en cours...\n"
         f"📝 Prompt : {prompt[:150]}\n"
-        f"🎨 Genre : {genre}\n"
+        f"🎨 Genre détecté : {genre}\n"
         f"⏳ ~10-20s..."
     )
 
     if variations:
-        # Générer 2 variations
-        from komara_video_agent import generate_variations
         results = generate_variations(prompt, count=2)
 
         if not results:
@@ -265,6 +263,8 @@ async def _generate_and_send(chat_id, context, prompt, variations=False):
                 chat_id,
                 f"⚠️ Image générée mais erreur d'envoi : {str(e)[:200]}"
             )
+    elif result.get("status") == "invalid":
+        await context.bot.send_message(chat_id, f"🤔 {result.get('error')}")
     else:
         error = result.get("error", "Erreur inconnue")
         await context.bot.send_message(
@@ -283,7 +283,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Aucune image reçue.")
         return
 
-    # On utilise le caption comme prompt pour générer une image inspirée
     if not caption:
         await update.message.reply_text(
             "📸 Photo reçue !\n"
@@ -292,12 +291,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    is_valid, reason = validate_prompt(caption)
+    if not is_valid:
+        await context.bot.send_message(chat_id, f"🤔 {reason}")
+        return
+
     await context.bot.send_message(
         chat_id,
         f"🎨 Génération inspirée de ta photo...\n📝 {caption[:150]}\n⏳ ~10-20s..."
     )
 
-    # On génère une nouvelle image basée sur le caption
     result = generate_image(caption)
 
     if result.get("status") == "success" and result.get("file_path"):
