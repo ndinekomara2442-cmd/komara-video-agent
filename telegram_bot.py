@@ -1,13 +1,15 @@
 """
-Komara Agency 🇬🇳 — Telegram Bot pour l'Agent Vidéo IA
-Utilise Hugging Face Inference API (100% gratuit) + Pollinations.ai fallback.
-Supporte Webhook (rapide) ET Polling (fallback).
+Komara Agency 🇬🇳 — Bot Telegram de génération visuelle
+Génère des images photoréalistes à partir de prompts texte.
+Pollinations.ai (gratuit, fiable) + Hugging Face (backup).
+Mode Webhook (instantané) ET Polling (fallback).
 """
 
 import os
 import json
 import logging
 import asyncio
+import urllib.parse
 from flask import Flask, request, jsonify
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -15,8 +17,8 @@ from telegram.ext import (
     ContextTypes, filters,
 )
 from komara_video_agent import (
-    generate_video, generate_image, generate_from_image,
-    generate_image_pollinations, build_prompt, PROMPT_TEMPLATES,
+    generate_image, generate_image_pollinations, generate_image_hf,
+    enhance_prompt, detect_genre, PROMPT_TEMPLATES,
 )
 
 # ============================================
@@ -26,13 +28,20 @@ from komara_video_agent import (
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN_2", "")
 BRAND_NAME = "Komara Agency 🇬🇳"
 
+# Contact info
+WHATSAPP = "+212701986219"
+EMAIL = "ndinekomara2442@gmail.com"
+TELEGRAM = "@ndinekomara_Bot"
+FACEBOOK = "facebook.com/ndine.komara"
+TIKTOK = "tiktok.com/@ndine.komara"
+SITE = "ndinekomara2442-cmd.github.io/komara-agency-site"
+
 # Webhook config
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")  # e.g. https://komara-ai-agent.up.railway.app
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "komara_secret_2026")
 PORT = int(os.environ.get("PORT", 8080))
 
-# Mode: webhook if WEBHOOK_URL is set, otherwise polling
 USE_WEBHOOK = bool(WEBHOOK_URL)
 
 logging.basicConfig(
@@ -46,8 +55,8 @@ logger = logging.getLogger(__name__)
 # ============================================
 
 MAIN_MENU = ReplyKeyboardMarkup(
-    [["🎬 Générer vidéo", "🖼️ Générer image"],
-     ["📋 Templates", "ℹ️ Aide"]],
+    [["🖼️ Générer une image", "📋 Templates"],
+     ["ℹ️ Aide", "📞 Contact"]],
     resize_keyboard=True,
 )
 
@@ -65,38 +74,34 @@ TEMPLATE_BUTTONS = [
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 Bienvenue chez {BRAND_NAME} !\n\n"
-        f"🎬 Agent Vidéo IA — Gratuit via Hugging Face\n\n"
-        f"Je génère des vidéos et images IA à partir de texte.\n\n"
-        f"Commandes :\n"
-        f"• /start — Bienvenue\n"
-        f"• /services — Nos services\n"
-        f"• /templates — Templates\n"
-        f"• /generer — Guide génération\n"
-        f"• /contact — Contact\n\n"
-        f"Envoyez votre prompt pour commencer !",
+        f"📸 Je génère des images photoréalistes 8K à partir de tes descriptions.\n\n"
+        f"Comment m'utiliser :\n"
+        f"1. Envoie ta description (prompt)\n"
+        f"2. J'analyse et j'améliore ton prompt\n"
+        f"3. Je génère l'image en ~10-20s\n\n"
+        f"Exemple :\n"
+        f"« Portrait d'un homme africain en costume noir, lumière dorée, studio pro »\n\n"
+        f"💎 Gratuit — Pollinations.ai + Hugging Face",
         reply_markup=MAIN_MENU,
     )
 
 async def services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"🎬 Services {BRAND_NAME}\n\n"
-        f"1️⃣ Texte → Vidéo (T2V)\n"
-        f"   Décrivez une scène, je génère la vidéo.\n\n"
-        f"2️⃣ Texte → Image (T2I)\n"
-        f"   Générez des images premium pour vos réseaux.\n\n"
-        f"3️⃣ Image → Vidéo (I2V)\n"
-        f"   Envoyez une image, je l'anime.\n\n"
-        f"4️⃣ Templates prédéfinis\n"
-        f"   Promo, branding, social, event.\n\n"
-        f"💎 100% gratuit — Hugging Face + Pollinations\n"
-        f"📐 Formats : 9:16, 16:9, 1:1\n"
-        f"⏱️ Durée vidéo : ~2-6 secondes",
-        reply_markup=MAIN_MENU,
+        f"📸 Services {BRAND_NAME}\n\n"
+        f"1️⃣ Génération d'images photoréalistes\n"
+        f"   Décris une scène, je génère l'image 8K.\n\n"
+        f"2️⃣ Templates prédéfinis\n"
+        f"   Promo produit, branding, social, événement.\n\n"
+        f"3️⃣ Variations\n"
+        f"   Tape 'variations: [prompt]' pour 2 images.\n\n"
+        f"💎 100% gratuit — Pollinations + Hugging Face\n"
+        f"📐 Format : 9:16 (portrait), 16:9 (paysage)\n"
+        f"🎨 Style : photoréaliste, luxury africain"
     )
 
 async def templates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📋 Templates — choisissez un template :",
+        "📋 Choisis un template :",
         reply_markup=InlineKeyboardMarkup(TEMPLATE_BUTTONS),
     )
 
@@ -107,30 +112,38 @@ async def template_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tpl = PROMPT_TEMPLATES.get(tpl_key, {})
     if tpl:
         await query.edit_message_text(
-            f"🎬 Template : {tpl['name']}\n\n"
-            f"Modèle : {tpl['template']}\n\n"
-            f"Envoyez votre prompt avec le préfixe /{tpl_key}\n\n"
-            f"Exemple : /{tpl_key} product=\"montre de luxe dorée\""
+            f"{tpl['name']}\n\n"
+            f"Template :\n{tpl['template']}\n\n"
+            f"Remplace les {{variables}} et envoie ton prompt.\n\n"
+            f"Exemple : « {tpl['template'].replace('{product}', 'montre dorée').replace('{concept}', 'élégance').replace('{subject}', 'coucher de soleil à Conakry').replace('{event_name}', 'lancement produit')[:80]}... »"
         )
     else:
         await query.edit_message_text("Template introuvable.")
 
 async def generer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎬 Génération de vidéo\n\n"
-        "Envoyez la description de la vidéo.\n\n"
+        "📸 Génération d'image\n\n"
+        "Envoie ta description en français ou anglais.\n\n"
+        "Plus tu es précis, meilleure est l'image :\n"
+        "• Sujet (personne, objet, scène)\n"
+        "• Éclairage (studio, golden hour, néon...)\n"
+        "• Ambiance (luxury, minimaliste, cinématique...)\n"
+        "• Fond (studio noir, paysage urbain...)\n\n"
         "Exemple :\n"
-        '"Drone shot over Conakry at sunset, golden hour, cinematic, 8k"\n\n'
-        "Le bot génère la vidéo et vous l'envoie directement.\n"
-        "⏱️ La génération prend ~30-60 secondes."
+        "« Portrait femme africaine, robe dorée, fond noir studio, lumière cinématique »\n\n"
+        "⏱️ ~10-20 secondes"
     )
 
 async def contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📞 Contact {BRAND_NAME}\n\n"
-        f"📍 Conakry, Guinée 🇬🇳\n"
-        f"🌐 GitHub : github.com/ndinekomara2442-cmd\n"
-        f"🤖 Telegram : @ndinekomara_Bot"
+        f"💬 WhatsApp : {WHATSAPP}\n"
+        f"✈️ Telegram : {TELEGRAM}\n"
+        f"📘 Facebook : {FACEBOOK}\n"
+        f"🎵 TikTok : {TIKTOK}\n"
+        f"📧 Email : {EMAIL}\n"
+        f"🌐 Site : {SITE}\n\n"
+        f"📍 Conakry, Guinée 🇬🇳"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -141,24 +154,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• /templates — Templates\n"
         f"• /generer — Guide génération\n"
         f"• /contact — Contact\n\n"
-        f"💎 Gratuit via Hugging Face\n"
-        f"Envoyez un prompt texte pour générer une vidéo !"
+        f"💡 Envoie simplement ta description d'image.\n"
+        f"💡 'variations: [prompt]' pour 2 versions.\n"
+        f"💎 Gratuit — Pollinations + HF"
     )
+
+# ============================================
+# TRAITEMENT DES MESSAGES — GÉNÉRATION
+# ============================================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     chat_id = update.effective_chat.id
 
-    if user_text == "🎬 Générer vidéo":
+    # Boutons du menu
+    if user_text == "🖼️ Générer une image":
         await generer(update, context)
-        return
-    elif user_text == "🖼️ Générer image":
-        await update.message.reply_text(
-            "🖼️ Génération d'image\n\n"
-            "Envoyez votre prompt pour générer une image premium.\n\n"
-            "Exemple :\n"
-            '"Luxury African brand portrait, golden hour, cinematic lighting, 8k"'
-        )
         return
     elif user_text == "📋 Templates":
         await templates(update, context)
@@ -166,70 +177,144 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user_text == "ℹ️ Aide":
         await help_command(update, context)
         return
+    elif user_text == "📞 Contact":
+        await contact(update, context)
+        return
 
-    await context.bot.send_message(chat_id, f"🎬 Génération en cours...\n📝 Prompt : {user_text[:200]}\n⏳ Patientez ~30-60s...")
+    # Mode variations
+    if user_text.lower().startswith("variations:"):
+        prompt = user_text[11:].strip()
+        if not prompt:
+            await update.message.reply_text("❌ Ajoute un prompt après 'variations:'")
+            return
+        await context.bot.send_message(
+            chat_id,
+            f"🎨 Génération de 2 variations...\n📝 {prompt[:150]}\n⏳ ~30s..."
+        )
+        await _generate_and_send(chat_id, context, prompt, variations=True)
+        return
 
-    result = generate_video(prompt=user_text)
+    # Détection: le texte est-il un prompt valide?
+    if len(user_text) < 3:
+        await update.message.reply_text(
+            "❌ Description trop courte.\n"
+            "Envoie au moins une phrase descriptive.\n"
+            "Ex: « logo luxury africain noir et or »"
+        )
+        return
+
+    # Génération normale
+    await _generate_and_send(chat_id, context, user_text, variations=False)
+
+async def _generate_and_send(chat_id, context, prompt, variations=False):
+    """Génère et envoie l'image au chat Telegram."""
+    # Informer l'utilisateur
+    genre = detect_genre(prompt)
+    enhanced = enhance_prompt(prompt)
+
+    status_msg = await context.bot.send_message(
+        chat_id,
+        f"📸 Génération en cours...\n"
+        f"📝 Prompt : {prompt[:150]}\n"
+        f"🎨 Genre : {genre}\n"
+        f"⏳ ~10-20s..."
+    )
+
+    if variations:
+        # Générer 2 variations
+        from komara_video_agent import generate_variations
+        results = generate_variations(prompt, count=2)
+
+        if not results:
+            await context.bot.send_message(
+                chat_id,
+                f"❌ Échec de génération. Réessaie avec un prompt plus précis."
+            )
+            return
+
+        for i, result in enumerate(results):
+            if result.get("status") == "success" and result.get("file_path"):
+                try:
+                    with open(result["file_path"], "rb") as img_file:
+                        await context.bot.send_photo(
+                            chat_id,
+                            photo=img_file,
+                            caption=f"🖼️ Variation {i+1}/2 — {BRAND_NAME}\n📝 {prompt[:100]}"
+                        )
+                except Exception as e:
+                    logger.error(f"Envoi variation {i+1}: {e}")
+        return
+
+    # Génération simple
+    result = generate_image(prompt)
 
     if result.get("status") == "success" and result.get("file_path"):
         try:
-            with open(result["file_path"], "rb") as video_file:
-                await context.bot.send_video(chat_id, video=video_file, caption=f"🎬 Vidéo générée par {BRAND_NAME}\n📝 {user_text[:100]}")
+            with open(result["file_path"], "rb") as img_file:
+                await context.bot.send_photo(
+                    chat_id,
+                    photo=img_file,
+                    caption=(
+                        f"✅ Image générée — {BRAND_NAME}\n"
+                        f"📝 {prompt[:100]}\n"
+                        f"🎨 Genre : {genre}"
+                    )
+                )
         except Exception as e:
-            await context.bot.send_message(chat_id, f"⚠️ Vidéo générée mais erreur d'envoi : {str(e)[:200]}\n📁 Fichier : {result['file_path']}")
-    elif result.get("status") == "loading":
-        await context.bot.send_message(chat_id, f"⏳ {result.get('message', 'Modèle en chargement. Réessayez dans 30s.')}")
+            await context.bot.send_message(
+                chat_id,
+                f"⚠️ Image générée mais erreur d'envoi : {str(e)[:200]}"
+            )
     else:
-        await context.bot.send_message(chat_id, "⚠️ Vidéo indisponible. Génération d'image en fallback...")
-        img_result = generate_image(prompt=user_text)
-        if img_result.get("status") == "success" and img_result.get("file_path"):
-            try:
-                with open(img_result["file_path"], "rb") as img_file:
-                    await context.bot.send_photo(chat_id, photo=img_file, caption=f"🖼️ Image générée par {BRAND_NAME}\n📝 {user_text[:100]}")
-            except Exception:
-                poll_result = generate_image_pollinations(prompt=user_text)
-                if poll_result.get("status") == "success" and poll_result.get("file_path"):
-                    with open(poll_result["file_path"], "rb") as img_file:
-                        await context.bot.send_photo(chat_id, photo=img_file, caption=f"🖼️ Image (Pollinations) — {BRAND_NAME}")
-                else:
-                    await context.bot.send_message(chat_id, f"❌ Erreur : {img_result.get('error', 'Inconnue')}")
-        else:
-            poll_result = generate_image_pollinations(prompt=user_text)
-            if poll_result.get("status") == "success":
-                with open(poll_result["file_path"], "rb") as img_file:
-                    await context.bot.send_photo(chat_id, photo=img_file, caption=f"🖼️ {BRAND_NAME} — Pollinations")
-            else:
-                await context.bot.send_message(chat_id, f"❌ Erreur : {result.get('error', 'Génération échouée')}")
+        error = result.get("error", "Erreur inconnue")
+        await context.bot.send_message(
+            chat_id,
+            f"❌ Génération échouée : {error[:200]}\n\n"
+            f"💡 Essaie avec un prompt plus simple ou plus précis."
+        )
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quand l'utilisateur envoie une photo avec une description."""
     photo = update.message.photo[-1] if update.message.photo else None
-    caption = update.message.caption or "Animate this image with cinematic movement"
+    caption = update.message.caption or ""
     chat_id = update.effective_chat.id
 
     if not photo:
         await update.message.reply_text("❌ Aucune image reçue.")
         return
 
-    await context.bot.send_message(chat_id, f"🎬 Image → Vidéo (I2V)\n📝 {caption[:200]}\n⏳ Génération...")
+    # On utilise le caption comme prompt pour générer une image inspirée
+    if not caption:
+        await update.message.reply_text(
+            "📸 Photo reçue !\n"
+            "Ajoute une description en légende pour générer une image inspirée.\n"
+            "Ex: « même style mais fond noir studio »"
+        )
+        return
 
-    try:
-        file = await context.bot.get_file(photo.file_id)
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            await file.download_to_drive(tmp.name)
-            image_path = tmp.name
+    await context.bot.send_message(
+        chat_id,
+        f"🎨 Génération inspirée de ta photo...\n📝 {caption[:150]}\n⏳ ~10-20s..."
+    )
 
-        result = generate_from_image(prompt=caption, first_frame_image=image_path)
+    # On génère une nouvelle image basée sur le caption
+    result = generate_image(caption)
 
-        if result.get("status") == "success" and result.get("file_path"):
-            with open(result["file_path"], "rb") as video_file:
-                await context.bot.send_video(chat_id, video=video_file, caption=f"🎬 I2V par {BRAND_NAME}")
-        else:
-            await context.bot.send_message(chat_id, f"❌ I2V indisponible : {result.get('error', 'Inconnue')}\n💡 Essayez T2V (texte → vidéo) à la place.")
-
-        os.unlink(image_path)
-    except Exception as e:
-        await context.bot.send_message(chat_id, f"❌ Erreur : {str(e)[:200]}")
+    if result.get("status") == "success" and result.get("file_path"):
+        try:
+            with open(result["file_path"], "rb") as img_file:
+                await context.bot.send_photo(
+                    chat_id,
+                    photo=img_file,
+                    caption=f"🎨 Image générée — {BRAND_NAME}\n📝 {caption[:100]}"
+                )
+        except Exception as e:
+            await context.bot.send_message(chat_id, f"⚠️ Erreur d'envoi : {str(e)[:200]}")
+    else:
+        await context.bot.send_message(
+            chat_id,
+            f"❌ Génération échouée. Essaie une autre description."
+        )
 
 async def error_handler(update, context):
     logger.error("Exception: %s", context.error)
@@ -239,7 +324,6 @@ async def error_handler(update, context):
 # ============================================
 
 def build_application():
-    """Build and configure the Telegram Application with all handlers."""
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
@@ -262,7 +346,6 @@ def build_application():
 flask_app = Flask(__name__)
 flask_app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
-# Global application instance for webhook
 telegram_app: Application = None
 
 @flask_app.route("/")
@@ -271,7 +354,7 @@ def home():
         "status": "ok",
         "service": BRAND_NAME,
         "mode": "webhook" if USE_WEBHOOK else "polling",
-        "bot": "@ndinekomara_Bot"
+        "bot": TELEGRAM,
     })
 
 @flask_app.route("/health")
@@ -280,15 +363,13 @@ def health():
 
 @flask_app.route(WEBHOOK_PATH, methods=["POST"])
 def webhook():
-    """Receive updates from Telegram via webhook."""
     secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
     if secret_header != WEBHOOK_SECRET:
         return jsonify({"error": "Unauthorized"}), 403
 
     update_data = request.get_json(force=True)
     update = Update.de_json(update_data, telegram_app.bot)
-    
-    # Process update asynchronously
+
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(telegram_app.process_update(update))
@@ -299,7 +380,6 @@ def webhook():
 
 @flask_app.route("/setwebhook")
 def set_webhook():
-    """Set the Telegram webhook. Call this URL once after deploy."""
     import urllib.request
     full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
@@ -319,7 +399,6 @@ def set_webhook():
 
 @flask_app.route("/delwebhook")
 def del_webhook():
-    """Remove the Telegram webhook (switch back to polling)."""
     import urllib.request
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
     req = urllib.request.Request(api_url, data=b'{}', headers={"Content-Type": "application/json"})
@@ -331,11 +410,10 @@ def del_webhook():
         return jsonify({"error": str(e)}), 500
 
 # ============================================
-# MAIN — WEBHOOK OR POLLING
+# MAIN
 # ============================================
 
 async def setup_webhook():
-    """Set the webhook on Telegram."""
     full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
     await telegram_app.bot.set_webhook(
         url=full_url,
@@ -343,23 +421,12 @@ async def setup_webhook():
         max_connections=40,
         allowed_updates=["message", "callback_query"]
     )
-    logger.info("✅ Webhook set: %s", full_url)
-
-async def run_webhook():
-    """Run the Flask app with webhook mode."""
-    global telegram_app
-    telegram_app = build_application()
-    await telegram_app.initialize()
-    await setup_webhook()
-    
-    flask_app.run(host="0.0.0.0", port=PORT, debug=False)
+    logger.info("Webhook set: %s", full_url)
 
 def run_polling():
-    """Fallback: run with polling."""
     app = build_application()
-    print(f"🚀 {BRAND_NAME} — Bot Vidéo IA (Hugging Face Edition)")
-    print(f"🤖 @ndinekomara_Bot")
-    print(f"💎 100% gratuit — HF + Pollinations")
+    print(f"🚀 {BRAND_NAME} — Bot de génération visuelle")
+    print(f"🤖 {TELEGRAM}")
     print("📡 Polling (fallback)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
@@ -369,20 +436,18 @@ def main():
         return
 
     if USE_WEBHOOK:
-        print(f"🚀 {BRAND_NAME} — Bot Vidéo IA")
+        print(f"🚀 {BRAND_NAME} — Bot de génération visuelle")
         print(f"📡 Webhook mode — réponses instantanées")
         print(f"🌐 URL: {WEBHOOK_URL}{WEBHOOK_PATH}")
-        
+
         global telegram_app
         telegram_app = build_application()
-        
-        # Initialize and set webhook
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(telegram_app.initialize())
         loop.run_until_complete(setup_webhook())
-        
-        # Start Flask
+
         flask_app.run(host="0.0.0.0", port=PORT, debug=False)
     else:
         run_polling()

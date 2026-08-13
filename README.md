@@ -1,43 +1,37 @@
-# Komara Agency 🇬🇳 — Video Agent IA
+# Komara Agency 🇬🇳 — Agent de Génération Visuelle
 
-Agent de génération vidéo et image IA pour Telegram.
-100% gratuit — propulsé par Hugging Face + Pollinations.ai
+Bot Telegram qui génère des images photoréalistes 8K à partir de prompts texte.
+100% gratuit — Pollinations.ai (principal) + Hugging Face (backup).
 
 ## Fonctionnalités
 
-1. Texte → Vidéo (T2V)
-2. Texte → Image (T2I)
-3. Image → Vidéo (I2V)
-4. Templates prédéfinis (promo, branding, social, event)
+1. Texte → Image photoréaliste (prompt suivit précisément)
+2. Templates prédéfinis (promo, branding, social, événement)
+3. Variations (2 images d'un même prompt)
+4. Image inspirée (envoyer photo + description)
 
-## Installation
+## Qualité
 
-```bash
-pip install -r requirements.txt
-```
+- Détection automatique du genre (portrait, produit, mode, paysage...)
+- Tags de qualité photoréaliste injectés (8K, skin texture, cinematic light)
+- Style luxury africain (noir + or, warm tones)
+- Le prompt utilisateur est toujours préservé et suivi
 
-## Configuration
+## Déploiement Railway
 
-Voir `.env.example` pour les variables d'environnement requises.
+1. Va sur https://railway.app
+2. New Project → Deploy from GitHub repo
+3. Sélectionne `ndinekomara2442-cmd/komara-video-agent`
+4. Variables à ajouter :
+   - `TELEGRAM_BOT_TOKEN_2` = ton token
+   - `HUGGING_FACE_ACCESS_TOKEN` = ton token HF
+   - `WEBHOOK_URL` = https://ton-app.up.railway.app
+5. Deploy
 
-## Démarrage
+## Variables
 
-```bash
-python telegram_bot.py
-```
-
-## Mode Webhook (recommandé)
-
-Pour des réponses instantanées, définissez `WEBHOOK_URL` avec votre domaine public.
-Le mode polling est utilisé automatiquement si `WEBHOOK_URL` n'est pas défini.
-
-## Technologies
-
-- Hugging Face Inference API (gratuit)
-- Pollinations.ai (fallback gratuit)
-- Telegram Bot API
-- Flask (serveur webhook)
+Voir `.env.example`
 
 ---
 
-© 2026 Komara Agency 🇬🇳 — Luxury African Digital Solutions
+© 2026 Komara Agency 🇬🇳 — Vision. Impact. Excellence.
