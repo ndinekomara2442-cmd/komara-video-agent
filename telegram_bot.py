@@ -345,7 +345,8 @@ async def _generate_and_send(chat_id, context, prompt, variations=False):
     )
 
     if variations:
-        results = generate_variations(prompt, count=2)
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(None, generate_variations, prompt, 2)
         if not results:
             await context.bot.send_message(chat_id, "❌ Échec de génération. Réessaie avec un prompt plus précis.")
             return
@@ -361,7 +362,8 @@ async def _generate_and_send(chat_id, context, prompt, variations=False):
                     logger.error(f"Envoi variation {i+1}: {e}")
         return
 
-    result = generate_image(prompt)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, generate_image, prompt)
     if result.get("status") == "success" and result.get("file_path"):
         try:
             with open(result["file_path"], "rb") as img_file:
