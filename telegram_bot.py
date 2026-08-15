@@ -7,7 +7,10 @@ Mode Webhook (instantané) ET Polling (fallback).
 """
 
 import os
+import sys
 import json
+import time
+import signal
 import logging
 import asyncio
 import urllib.parse
@@ -74,37 +77,28 @@ except json.JSONDecodeError as e:
 # Q&A IA — Gemini avec base de connaissances
 # ============================================
 
-# Mots-clés qui déclenchent le Q&A plutôt que la génération d'image
 QA_KEYWORDS = [
     "vos services", "service", "tarif", "prix", "combien", "coût", "cout",
     "contact", "aide", "info", "information", "horaires", "délai", "delai",
     "réclamation", "question", "proposez", "offre", "disponible",
     "whatsapp", "email", "telegram", "facebook", "tiktok",
-    "komara", "agence", "agence", "guinée", "guinee", "conakry",
+    "komara", "agence", "guinée", "guinee", "conakry",
 ]
 
 def is_qa_question(text):
-    """Détecte si le message est une question sur les services et non un prompt d'image."""
     text_lower = text.lower().strip()
-    # Si ça commence par "variations:" → génération d'image
     if text_lower.startswith("variations:"):
         return False
-    # Vérifier les mots-clés Q&A
     for keyword in QA_KEYWORDS:
         if keyword in text_lower:
             return True
-    # Si ça contient un "?" → probablement une question
     if "?" in text:
         return True
     return False
 
 def ask_gemini_with_knowledge(question):
-    """
-    Envoie la question à Gemini avec la base de connaissances en contexte.
-    Retourne une réponse textuelle propre.
-    """
     if not GEMINI_API_KEY:
-        return "Désolé, le service de Q&A n'est pas configuré pour le moment. Contactez-nous via WhatsApp: " + WHATTSAPP
+        return f"Désolé, le service de Q&A n'est pas configuré. Contactez-nous via WhatsApp: {WHATSAPP}"
 
     knowledge_str = json.dumps(KNOWLEDGE, ensure_ascii=False) if KNOWLEDGE else "{}"
 
@@ -150,7 +144,7 @@ def ask_gemini_with_knowledge(question):
         return text_response.strip() or "Désolé, je n'ai pas pu générer une réponse."
     except Exception as e:
         logger.error(f"Erreur Gemini Q&A: {e}")
-        return f"Erreur lors du traitement de votre question. Contactez-nous via WhatsApp: {WHATSAPP}"
+        return f"Erreur lors du traitement. Contactez-nous via WhatsApp: {WHATSAPP}"
 
 # ============================================
 # KEYBOARDS
@@ -189,18 +183,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def services(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche les services en lisant knowledge.json via Gemini."""
     await update.message.reply_text("Je récupère les infos... ⏳")
-
     question = "Présente tous vos services avec leurs prix, descriptions et délais. Sois clair et organisé."
-
     try:
         loop = asyncio.get_event_loop()
         reponse = await loop.run_in_executor(None, ask_gemini_with_knowledge, question)
-
-        # Gemini peut retourner une longue réponse — Telegram limite à 4096 chars
         if len(reponse) > 4000:
-            # Couper en deux messages
             mid = reponse[:4000].rfind('\n')
             if mid < 2000:
                 mid = 4000
@@ -284,7 +272,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     chat_id = update.effective_chat.id
 
-    # Boutons du menu
     if user_text == "🖼️ Générer une image":
         await generer(update, context)
         return
@@ -301,7 +288,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await contact(update, context)
         return
 
-    # Mode variations
     if user_text.lower().startswith("variations:"):
         prompt = user_text[11:].strip()
         if not prompt:
@@ -310,13 +296,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _generate_and_send(chat_id, context, prompt, variations=True)
         return
 
-    # Détection Q&A vs génération d'image
     if is_qa_question(user_text):
         await update.message.reply_text("Je regarde ça... ⏳")
         try:
             loop = asyncio.get_event_loop()
             reponse = await loop.run_in_executor(None, ask_gemini_with_knowledge, user_text)
-
             if len(reponse) > 4000:
                 mid = reponse[:4000].rfind('\n')
                 if mid < 2000:
@@ -334,13 +318,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # Génération d'image — par défaut
     await _generate_and_send(chat_id, context, user_text, variations=False)
 
 async def _generate_and_send(chat_id, context, prompt, variations=False):
-    """Valide le prompt, génère et envoie l'image au chat Telegram."""
-
-    # 1. Valider le prompt AVANT tout traitement
     is_valid, reason = validate_prompt(prompt)
     if not is_valid:
         await context.bot.send_message(
@@ -366,59 +346,42 @@ async def _generate_and_send(chat_id, context, prompt, variations=False):
 
     if variations:
         results = generate_variations(prompt, count=2)
-
         if not results:
-            await context.bot.send_message(
-                chat_id,
-                f"❌ Échec de génération. Réessaie avec un prompt plus précis."
-            )
+            await context.bot.send_message(chat_id, "❌ Échec de génération. Réessaie avec un prompt plus précis.")
             return
-
         for i, result in enumerate(results):
             if result.get("status") == "success" and result.get("file_path"):
                 try:
                     with open(result["file_path"], "rb") as img_file:
                         await context.bot.send_photo(
-                            chat_id,
-                            photo=img_file,
+                            chat_id, photo=img_file,
                             caption=f"🖼️ Variation {i+1}/2 — {BRAND_NAME}\n📝 {prompt[:100]}"
                         )
                 except Exception as e:
                     logger.error(f"Envoi variation {i+1}: {e}")
         return
 
-    # Génération simple
     result = generate_image(prompt)
-
     if result.get("status") == "success" and result.get("file_path"):
         try:
             with open(result["file_path"], "rb") as img_file:
                 await context.bot.send_photo(
-                    chat_id,
-                    photo=img_file,
-                    caption=(
-                        f"✅ Image générée — {BRAND_NAME}\n"
-                        f"📝 {prompt[:100]}\n"
-                        f"🎨 Genre : {genre}"
-                    )
+                    chat_id, photo=img_file,
+                    caption=f"✅ Image générée — {BRAND_NAME}\n📝 {prompt[:100]}\n🎨 Genre : {genre}"
                 )
         except Exception as e:
-            await context.bot.send_message(
-                chat_id,
-                f"⚠️ Image générée mais erreur d'envoi : {str(e)[:200]}"
-            )
+            await context.bot.send_message(chat_id, f"⚠️ Image générée mais erreur d'envoi : {str(e)[:200]}")
     elif result.get("status") == "invalid":
         await context.bot.send_message(chat_id, f"🤔 {result.get('error')}")
     else:
         error = result.get("error", "Erreur inconnue")
         await context.bot.send_message(
             chat_id,
-            f"❌ Génération échouée : {error[:200]}\n\n"
-            f"💡 Essaie avec un prompt plus simple ou reformule."
+            f"❌ Génération échouée : {error[:200]}\n\n💡 Essaie avec un prompt plus simple ou reformule."
         )
 
 # ============================================
-# WEBHOOK / POLLING
+# WEBHOOK / POLLING — anti-conflit
 # ============================================
 
 flask_app = Flask(__name__)
@@ -431,16 +394,55 @@ def health():
 def webhook():
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
         return jsonify({"error": "unauthorized"}), 403
-
     update = Update.de_json(request.get_json(force=True), None)
     asyncio.run(application.process_update(update))
     return jsonify({"ok": True})
 
 application = None
 
+# Verrou anti-double-instance — si un fichier lock existe, on attend qu'il disparaisse
+LOCK_FILE = "/tmp/komara_bot.lock"
+
+def acquire_lock():
+    """Crée un fichier lock pour éviter les doubles instances."""
+    import fcntl
+    global lock_fd
+    lock_fd = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        logger.info("Lock acquis — instance unique garantie")
+        return True
+    except (IOError, OSError):
+        logger.warning("Lock déjà pris — une autre instance tourne déjà. Arrêt.")
+        lock_fd.close()
+        return False
+
 def main():
     global application
 
+    # 1. Vérifier le token
+    if not BOT_TOKEN:
+        sys.exit("ERREUR: TELEGRAM_BOT_TOKEN_2 manquant dans les variables d'environnement.")
+
+    # 2. Acquérir le lock anti-double-instance
+    if not acquire_lock():
+        sys.exit("ERREUR: Une autre instance du bot tourne déjà. Arrêt pour éviter le conflit.")
+
+    # 3. Nettoyer les webhooks/polling existants AVANT de démarrer
+    #    Ça force Telegram à déconnecter l'ancienne session getUpdates
+    logger.info("Nettoyage des sessions Telegram existantes...")
+    from telegram import Bot
+    bot = Bot(token=BOT_TOKEN)
+    try:
+        bot.delete_webhook(drop_pending_updates=False)
+        logger.info("Webhook supprimé — ancienne session nettoyée.")
+    except Exception as e:
+        logger.warning(f"delete_webhook: {e}")
+
+    # Petite pause pour laisser Telegram fermer l'ancien polling
+    time.sleep(2)
+
+    # 4. Construire l'application
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("services", services))
@@ -451,6 +453,7 @@ def main():
     application.add_handler(CallbackQueryHandler(template_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    # 5. Démarrer
     if USE_WEBHOOK:
         logger.info(f"Mode Webhook — URL: {WEBHOOK_URL}")
         application.run_webhook(
@@ -460,8 +463,11 @@ def main():
             secret_token=WEBHOOK_SECRET,
         )
     else:
-        logger.info("Mode Polling")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        logger.info("Mode Polling — instance unique garantie par lock file")
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=False,
+        )
 
 if __name__ == "__main__":
     main()
