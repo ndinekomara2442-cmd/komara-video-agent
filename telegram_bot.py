@@ -133,7 +133,7 @@ def ask_gemini_with_knowledge(question):
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash-exp:generateContent?key={GEMINI_API_KEY}"
+        f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     )
 
     payload = {
@@ -451,12 +451,18 @@ def main():
     #    Ça force Telegram à déconnecter l'ancienne session getUpdates
     logger.info("Nettoyage des sessions Telegram existantes...")
     from telegram import Bot
-    bot = Bot(token=BOT_TOKEN)
-    try:
-        bot.delete_webhook(drop_pending_updates=False)
-        logger.info("Webhook supprimé — ancienne session nettoyée.")
-    except Exception as e:
-        logger.warning(f"delete_webhook: {e}")
+
+    async def _cleanup():
+        bot = Bot(token=BOT_TOKEN)
+        try:
+            await bot.delete_webhook(drop_pending_updates=False)
+            logger.info("Webhook supprimé — ancienne session nettoyée.")
+        except Exception as e:
+            logger.warning(f"delete_webhook: {e}")
+        finally:
+            await bot.shutdown()
+
+    asyncio.run(_cleanup())
 
     # Petite pause pour laisser Telegram fermer l'ancien polling
     time.sleep(2)
