@@ -1,7 +1,8 @@
 """
-Komara Agency 🇬🇳 — Bot Telegram de génération visuelle
+Komara Agency 🇬🇳 — Bot Telegram de génération visuelle + Assistant IA
 Génère des images photoréalistes à partir de prompts texte.
 Pollinations.ai (gratuit, fiable) + Hugging Face (backup).
+Q&A avec base de connaissances via Gemini API.
 Mode Webhook (instantané) ET Polling (fallback).
 """
 
@@ -10,6 +11,7 @@ import json
 import logging
 import asyncio
 import urllib.parse
+import requests
 from flask import Flask, request, jsonify
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -27,6 +29,7 @@ from komara_video_agent import (
 # ============================================
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN_2", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 BRAND_NAME = "Komara Agency 🇬🇳"
 
 # Contact info
@@ -52,12 +55,110 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================
+# BASE DE CONNAISSANCES
+# ============================================
+
+KNOWLEDGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge.json")
+try:
+    with open(KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
+        KNOWLEDGE = json.load(f)
+    logger.info(f"knowledge.json chargé ({len(KNOWLEDGE.get('services', []))} services)")
+except FileNotFoundError:
+    logger.warning("knowledge.json introuvable — Q&A désactivé")
+    KNOWLEDGE = None
+except json.JSONDecodeError as e:
+    logger.warning(f"knowledge.json invalide: {e}")
+    KNOWLEDGE = None
+
+# ============================================
+# Q&A IA — Gemini avec base de connaissances
+# ============================================
+
+# Mots-clés qui déclenchent le Q&A plutôt que la génération d'image
+QA_KEYWORDS = [
+    "vos services", "service", "tarif", "prix", "combien", "coût", "cout",
+    "contact", "aide", "info", "information", "horaires", "délai", "delai",
+    "réclamation", "question", "proposez", "offre", "disponible",
+    "whatsapp", "email", "telegram", "facebook", "tiktok",
+    "komara", "agence", "agence", "guinée", "guinee", "conakry",
+]
+
+def is_qa_question(text):
+    """Détecte si le message est une question sur les services et non un prompt d'image."""
+    text_lower = text.lower().strip()
+    # Si ça commence par "variations:" → génération d'image
+    if text_lower.startswith("variations:"):
+        return False
+    # Vérifier les mots-clés Q&A
+    for keyword in QA_KEYWORDS:
+        if keyword in text_lower:
+            return True
+    # Si ça contient un "?" → probablement une question
+    if "?" in text:
+        return True
+    return False
+
+def ask_gemini_with_knowledge(question):
+    """
+    Envoie la question à Gemini avec la base de connaissances en contexte.
+    Retourne une réponse textuelle propre.
+    """
+    if not GEMINI_API_KEY:
+        return "Désolé, le service de Q&A n'est pas configuré pour le moment. Contactez-nous via WhatsApp: " + WHATTSAPP
+
+    knowledge_str = json.dumps(KNOWLEDGE, ensure_ascii=False) if KNOWLEDGE else "{}"
+
+    system_prompt = (
+        "Tu es Komara Agency, une agence digitale basée à Conakry, Guinée. "
+        "Réponds aux questions des clients en utilisant UNIQUEMENT ces informations:\n\n"
+        f"{knowledge_str}\n\n"
+        "Règles:\n"
+        "- Réponds de manière claire, professionnelle et concise\n"
+        "- Si l'info n'est pas dans la base, dis-le honnêtement\n"
+        "- Utilise des émojis légèrement pour un ton chaleureux\n"
+        "- Réponds toujours en français\n"
+        "- Ne dépasse pas 500 mots"
+    )
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.0-flash-exp:generateContent?key={GEMINI_API_KEY}"
+    )
+
+    payload = {
+        "contents": [
+            {"role": "user", "parts": [{"text": f"{system_prompt}\n\nQuestion du client: {question}"}]}
+        ],
+        "generationConfig": {
+            "responseModalities": ["TEXT"],
+            "temperature": 0.7,
+            "maxOutputTokens": 800,
+        },
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+
+        parts = data["candidates"][0]["content"]["parts"]
+        text_response = ""
+        for part in parts:
+            if "text" in part:
+                text_response += part["text"]
+
+        return text_response.strip() or "Désolé, je n'ai pas pu générer une réponse."
+    except Exception as e:
+        logger.error(f"Erreur Gemini Q&A: {e}")
+        return f"Erreur lors du traitement de votre question. Contactez-nous via WhatsApp: {WHATSAPP}"
+
+# ============================================
 # KEYBOARDS
 # ============================================
 
 MAIN_MENU = ReplyKeyboardMarkup(
     [["🖼️ Générer une image", "📋 Templates"],
-     ["ℹ️ Aide", "📞 Contact"]],
+     ["💼 Vos services", "ℹ️ Aide", "📞 Contact"]],
     resize_keyboard=True,
 )
 
@@ -75,30 +176,44 @@ TEMPLATE_BUTTONS = [
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 Bienvenue chez {BRAND_NAME} !\n\n"
-        f"📸 Je génère des images photoréalistes 8K à partir de tes descriptions.\n\n"
+        f"📸 Je génère des images photoréalistes 8K à partir de tes descriptions.\n"
+        f"💼 Je réponds aussi à tes questions sur nos services.\n\n"
         f"Comment m'utiliser :\n"
-        f"1. Envoie ta description (prompt)\n"
-        f"2. J'analyse et j'améliore ton prompt\n"
-        f"3. Je génère l'image en ~10-20s\n\n"
-        f"Exemple :\n"
+        f"1. Pour une image : envoie ta description\n"
+        f"2. Pour nos services : tape « Vos services »\n"
+        f"3. Pour une question : tape ta question simplement\n\n"
+        f"Exemple image :\n"
         f"« Portrait d'un homme africain en costume noir, lumière dorée, studio pro »\n\n"
         f"💎 Gratuit — Pollinations.ai + Hugging Face",
         reply_markup=MAIN_MENU,
     )
 
 async def services(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"📸 Services {BRAND_NAME}\n\n"
-        f"1️⃣ Génération d'images photoréalistes\n"
-        f"   Décris une scène, je génère l'image 8K.\n\n"
-        f"2️⃣ Templates prédéfinis\n"
-        f"   Promo produit, branding, social, événement.\n\n"
-        f"3️⃣ Variations\n"
-        f"   Tape 'variations: [prompt]' pour 2 images.\n\n"
-        f"💎 100% gratuit — Pollinations + Hugging Face\n"
-        f"📐 Format : 9:16 (portrait), 16:9 (paysage)\n"
-        f"🎨 Style : photoréaliste, luxury africain"
-    )
+    """Affiche les services en lisant knowledge.json via Gemini."""
+    await update.message.reply_text("Je récupère les infos... ⏳")
+
+    question = "Présente tous vos services avec leurs prix, descriptions et délais. Sois clair et organisé."
+
+    try:
+        loop = asyncio.get_event_loop()
+        reponse = await loop.run_in_executor(None, ask_gemini_with_knowledge, question)
+
+        # Gemini peut retourner une longue réponse — Telegram limite à 4096 chars
+        if len(reponse) > 4000:
+            # Couper en deux messages
+            mid = reponse[:4000].rfind('\n')
+            if mid < 2000:
+                mid = 4000
+            await update.message.reply_text(reponse[:mid], reply_markup=MAIN_MENU)
+            await update.message.reply_text(reponse[mid:], reply_markup=MAIN_MENU)
+        else:
+            await update.message.reply_text(reponse, reply_markup=MAIN_MENU)
+    except Exception as e:
+        logger.error(f"Erreur services: {e}")
+        await update.message.reply_text(
+            f"Erreur: {str(e)[:200]}\n\nContactez-nous: WhatsApp {WHATSAPP}",
+            reply_markup=MAIN_MENU,
+        )
 
 async def templates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -151,17 +266,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"ℹ️ Aide — {BRAND_NAME}\n\n"
         f"• /start — Démarrer\n"
-        f"• /services — Services\n"
+        f"• /services — Nos services\n"
         f"• /templates — Templates\n"
         f"• /generer — Guide génération\n"
         f"• /contact — Contact\n\n"
-        f"💡 Envoie simplement ta description d'image.\n"
+        f"💡 Envoie ta description d'image pour générer.\n"
         f"💡 'variations: [prompt]' pour 2 versions.\n"
+        f"💡 Pose une question sur nos services pour obtenir une réponse IA.\n"
         f"💎 Gratuit — Pollinations + HF"
     )
 
 # ============================================
-# TRAITEMENT DES MESSAGES — GÉNÉRATION
+# TRAITEMENT DES MESSAGES
 # ============================================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -174,6 +290,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     elif user_text == "📋 Templates":
         await templates(update, context)
+        return
+    elif user_text == "💼 Vos services":
+        await services(update, context)
         return
     elif user_text == "ℹ️ Aide":
         await help_command(update, context)
@@ -191,7 +310,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _generate_and_send(chat_id, context, prompt, variations=True)
         return
 
-    # Génération normale — la validation se fait dans _generate_and_send
+    # Détection Q&A vs génération d'image
+    if is_qa_question(user_text):
+        await update.message.reply_text("Je regarde ça... ⏳")
+        try:
+            loop = asyncio.get_event_loop()
+            reponse = await loop.run_in_executor(None, ask_gemini_with_knowledge, user_text)
+
+            if len(reponse) > 4000:
+                mid = reponse[:4000].rfind('\n')
+                if mid < 2000:
+                    mid = 4000
+                await context.bot.send_message(chat_id, reponse[:mid])
+                await context.bot.send_message(chat_id, reponse[mid:], reply_markup=MAIN_MENU)
+            else:
+                await context.bot.send_message(chat_id, reponse, reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error(f"Erreur Q&A: {e}")
+            await context.bot.send_message(
+                chat_id,
+                f"Erreur: {str(e)[:200]}\n\nContactez-nous: WhatsApp {WHATSAPP}",
+                reply_markup=MAIN_MENU,
+            )
+        return
+
+    # Génération d'image — par défaut
     await _generate_and_send(chat_id, context, user_text, variations=False)
 
 async def _generate_and_send(chat_id, context, prompt, variations=False):
@@ -206,7 +349,8 @@ async def _generate_and_send(chat_id, context, prompt, variations=False):
             f"Donne-moi une vraie description visuelle, par exemple :\n"
             f"« Portrait d'un homme africain, costume noir, lumière dorée, studio »\n"
             f"« Logo luxury noir et or pour une marque de mode »\n"
-            f"« Paysage de Conakry au coucher du soleil, vue aérienne »"
+            f"« Paysage de Conakry au coucher du soleil, vue aérienne »\n\n"
+            f"💡 Pour poser une question sur nos services, tape « Vos services »"
         )
         return
 
@@ -270,190 +414,54 @@ async def _generate_and_send(chat_id, context, prompt, variations=False):
         await context.bot.send_message(
             chat_id,
             f"❌ Génération échouée : {error[:200]}\n\n"
-            f"💡 Essaie avec un prompt plus simple ou plus précis."
+            f"💡 Essaie avec un prompt plus simple ou reformule."
         )
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Quand l'utilisateur envoie une photo avec une description."""
-    photo = update.message.photo[-1] if update.message.photo else None
-    caption = update.message.caption or ""
-    chat_id = update.effective_chat.id
-
-    if not photo:
-        await update.message.reply_text("❌ Aucune image reçue.")
-        return
-
-    if not caption:
-        await update.message.reply_text(
-            "📸 Photo reçue !\n"
-            "Ajoute une description en légende pour générer une image inspirée.\n"
-            "Ex: « même style mais fond noir studio »"
-        )
-        return
-
-    is_valid, reason = validate_prompt(caption)
-    if not is_valid:
-        await context.bot.send_message(chat_id, f"🤔 {reason}")
-        return
-
-    await context.bot.send_message(
-        chat_id,
-        f"🎨 Génération inspirée de ta photo...\n📝 {caption[:150]}\n⏳ ~10-20s..."
-    )
-
-    result = generate_image(caption)
-
-    if result.get("status") == "success" and result.get("file_path"):
-        try:
-            with open(result["file_path"], "rb") as img_file:
-                await context.bot.send_photo(
-                    chat_id,
-                    photo=img_file,
-                    caption=f"🎨 Image générée — {BRAND_NAME}\n📝 {caption[:100]}"
-                )
-        except Exception as e:
-            await context.bot.send_message(chat_id, f"⚠️ Erreur d'envoi : {str(e)[:200]}")
-    else:
-        await context.bot.send_message(
-            chat_id,
-            f"❌ Génération échouée. Essaie une autre description."
-        )
-
-async def error_handler(update, context):
-    logger.error("Exception: %s", context.error)
 
 # ============================================
-# APPLICATION SETUP
+# WEBHOOK / POLLING
 # ============================================
 
-def build_application():
+flask_app = Flask(__name__)
+
+@flask_app.route("/health")
+def health():
+    return jsonify({"status": "ok", "bot": BRAND_NAME})
+
+@flask_app.route(WEBHOOK_PATH, methods=["POST"])
+def webhook():
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        return jsonify({"error": "unauthorized"}), 403
+
+    update = Update.de_json(request.get_json(force=True), None)
+    asyncio.run(application.process_update(update))
+    return jsonify({"ok": True})
+
+application = None
+
+def main():
+    global application
+
     application = Application.builder().token(BOT_TOKEN).build()
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("services", services))
     application.add_handler(CommandHandler("templates", templates))
     application.add_handler(CommandHandler("generer", generer))
     application.add_handler(CommandHandler("contact", contact))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CallbackQueryHandler(template_callback, pattern="^tpl_"))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(CallbackQueryHandler(template_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_error_handler(error_handler)
-
-    return application
-
-# ============================================
-# FLASK WEBHOOK MODE
-# ============================================
-
-flask_app = Flask(__name__)
-flask_app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
-
-telegram_app: Application = None
-
-@flask_app.route("/")
-def home():
-    return jsonify({
-        "status": "ok",
-        "service": BRAND_NAME,
-        "mode": "webhook" if USE_WEBHOOK else "polling",
-        "bot": TELEGRAM,
-    })
-
-@flask_app.route("/health")
-def health():
-    return jsonify({"status": "healthy", "service": BRAND_NAME})
-
-@flask_app.route(WEBHOOK_PATH, methods=["POST"])
-def webhook():
-    secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    if secret_header != WEBHOOK_SECRET:
-        return jsonify({"error": "Unauthorized"}), 403
-
-    update_data = request.get_json(force=True)
-    update = Update.de_json(update_data, telegram_app.bot)
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(telegram_app.process_update(update))
-    finally:
-        loop.close()
-
-    return jsonify({"status": "ok"})
-
-@flask_app.route("/setwebhook")
-def set_webhook():
-    import urllib.request
-    full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-    api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
-    data = json.dumps({
-        "url": full_url,
-        "secret_token": WEBHOOK_SECRET,
-        "max_connections": 40,
-        "allowed_updates": ["message", "callback_query"]
-    }).encode()
-    req = urllib.request.Request(api_url, data=data, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req) as resp:
-            result = json.loads(resp.read().decode())
-        return jsonify({"result": result, "webhook_url": full_url})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@flask_app.route("/delwebhook")
-def del_webhook():
-    import urllib.request
-    api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
-    req = urllib.request.Request(api_url, data=b'{}', headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req) as resp:
-            result = json.loads(resp.read().decode())
-        return jsonify({"result": result})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# ============================================
-# MAIN
-# ============================================
-
-async def setup_webhook():
-    full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-    await telegram_app.bot.set_webhook(
-        url=full_url,
-        secret_token=WEBHOOK_SECRET,
-        max_connections=40,
-        allowed_updates=["message", "callback_query"]
-    )
-    logger.info("Webhook set: %s", full_url)
-
-def run_polling():
-    app = build_application()
-    print(f"🚀 {BRAND_NAME} — Bot de génération visuelle")
-    print(f"🤖 {TELEGRAM}")
-    print("📡 Polling (fallback)...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-def main():
-    if not BOT_TOKEN:
-        print("ERREUR : TELEGRAM_BOT_TOKEN_2 non défini.")
-        return
 
     if USE_WEBHOOK:
-        print(f"🚀 {BRAND_NAME} — Bot de génération visuelle")
-        print(f"📡 Webhook mode — réponses instantanées")
-        print(f"🌐 URL: {WEBHOOK_URL}{WEBHOOK_PATH}")
-
-        global telegram_app
-        telegram_app = build_application()
-
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(telegram_app.initialize())
-        loop.run_until_complete(setup_webhook())
-
-        flask_app.run(host="0.0.0.0", port=PORT, debug=False)
+        logger.info(f"Mode Webhook — URL: {WEBHOOK_URL}")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=f"{WEBHOOK_URL}{WEBHOOK_PATH}",
+            secret_token=WEBHOOK_SECRET,
+        )
     else:
-        run_polling()
+        logger.info("Mode Polling")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
