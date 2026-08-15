@@ -77,23 +77,40 @@ except json.JSONDecodeError as e:
 # Q&A IA — Gemini avec base de connaissances
 # ============================================
 
-QA_KEYWORDS = [
-    "vos services", "service", "tarif", "prix", "combien", "coût", "cout",
-    "contact", "aide", "info", "information", "horaires", "délai", "delai",
-    "réclamation", "question", "proposez", "offre", "disponible",
-    "whatsapp", "email", "telegram", "facebook", "tiktok",
-    "komara", "agence", "guinée", "guinee", "conakry",
+# Phrases précises (pas de mots isolés trop courants) — évite les faux positifs
+# quand un prompt d'image mentionne "Komara Agency", "aide-toi du style...", etc.
+QA_PHRASES = [
+    "vos services", "quels services", "que proposez", "quels sont vos",
+    "combien ça coûte", "combien coûte", "combien coute", "quel est le prix",
+    "quel prix", "vos tarifs", "vos tarif", "c'est combien",
+    "délai de livraison", "delai de livraison", "combien de temps ça prend",
+    "comment vous contacter", "comment te contacter", "numero whatsapp",
+    "numéro whatsapp", "votre contact", "vos contacts",
+    "horaires d'ouverture", "où êtes-vous", "où êtes vous", "ou etes vous",
+    "c'est gratuit", "est-ce gratuit", "est ce gratuit", "vous êtes qui",
+    "qui êtes-vous", "c'est quoi komara", "qu'est-ce que komara",
 ]
 
 def is_qa_question(text):
     text_lower = text.lower().strip()
     if text_lower.startswith("variations:"):
         return False
-    for keyword in QA_KEYWORDS:
-        if keyword in text_lower:
+
+    word_count = len(text_lower.split())
+
+    # Prompt long et descriptif → très probablement une description d'image,
+    # même s'il mentionne la marque "Komara Agency" pour le style
+    if word_count > 25:
+        return False
+
+    for phrase in QA_PHRASES:
+        if phrase in text_lower:
             return True
-    if "?" in text:
+
+    # "?" seul ne suffit pas si le message est long (brief créatif)
+    if "?" in text and word_count <= 20:
         return True
+
     return False
 
 def ask_gemini_with_knowledge(question):
